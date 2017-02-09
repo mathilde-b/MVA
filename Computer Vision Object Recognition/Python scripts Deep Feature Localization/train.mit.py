@@ -1,0 +1,240 @@
+import tensorflow as tf
+import numpy as np
+import pandas as pd
+import _pickle  as cPickle
+from random import shuffle
+import math
+
+import test
+from detector import Detector
+from util import load_image
+import os
+import ipdb
+
+weight_path = '/Users/mathildebateson/Documents/MVA/Recvis/Caltech/caffe_layers_value.pickle'
+model_path = '/Users/mathildebateson/Documents/MVA/Recvis/Project/Data/'
+pretrained_model_path = '/Users/mathildebateson/Documents/MVA/Recvis/Caltech/model-0'
+n_epochs = 10
+init_learning_rate = 0.01
+weight_decay_rate = 0.0005
+momentum = 0.9
+batch_size = 60
+
+dataset_path = '/Users/mathildebateson/Documents/MVA/Recvis/Project/Data/OpticalFlows'
+caltech_path = '/Users/mathildebateson/Documents/MVA/Recvis/Project/Data/OpticalFlows'
+trainset_path = '/Users/mathildebateson/Documents/MVA/Recvis/Project/Data/train.pickle'
+testset_path = '/Users/mathildebateson/Documents/MVA/Recvis/Project/Data/test.pickle'
+label_dict_path = '/Users/mathildebateson/Documents/MVA/Recvis/Project/Data/label_dict.pickle'
+
+if not os.path.exists( trainset_path):
+    if not os.path.exists(caltech_path):
+        os.makedirs(caltech_path)
+    image_dir_list = os.listdir(dataset_path)
+    image_dir_list=image_dir_list[1:]
+
+    label_pairs = map(lambda x: x.split('.'), image_dir_list)
+    labels, label_names = zip(*label_pairs)
+    #a = list(labels)  # make a mutable
+    #a[0] = "000"  # now new assignment will be valid
+    #labels = tuple(a)  # make a again a tuple
+    labels = map(lambda x: int(x), labels)
+
+    label_dict = pd.Series(labels, index=label_names)
+    label_dict -= 1
+    n_labels = len( label_dict )
+
+
+    image_paths_per_label = map(lambda one_dir: map(lambda one_file: os.path.join( dataset_path, one_dir, one_file ), os.listdir( os.path.join( dataset_path, one_dir))), image_dir_list)
+    a=list(image_paths_per_label)
+    testtmp = list('')
+    traintmp = list('')
+    for i in range(0,len(a)):
+        temp=[*a[i]]
+        #shuffle(temp) #optional
+        testtmp.append(temp[-math.floor(len(temp)/5):]) #20% in testset
+        traintmp.append(temp[:-math.floor(len(temp)/5)])
+
+
+    image_paths_train = [item for sublist in traintmp for item in sublist]
+    np.array(image_paths_train).astype('<U115')
+    image_paths_test = [item for sublist in testtmp for item in sublist]
+    np.array(image_paths_test).astype('<U115')
+
+    #image_paths_train = np.hstack(list(map(lambda one_class: list(one_class)[:-10], image_paths_per_label)))
+    #image_paths_test = np.hstack(list(map(lambda one_class: list(one_class)[-10:], image_paths_per_label)))
+
+    trainset = pd.DataFrame({'image_path': image_paths_train})
+    testset  = pd.DataFrame({'image_path': image_paths_test })
+
+    trainset = trainset[ trainset['image_path'].map( lambda x: x.endswith('.jpg'))]
+    trainset['label'] = trainset['image_path'].map(lambda x: int(x.split('/')[-2].split('.')[0]) - 1)
+    trainset['label_name'] = trainset['image_path'].map(lambda x: x.split('/')[-2].split('.')[1])
+
+    testset = testset[ testset['image_path'].map( lambda x: x.endswith('.jpg'))]
+    testset['label'] = testset['image_path'].map(lambda x: int(x.split('/')[-2].split('.')[0]) - 1)
+    testset['label_name'] = testset['image_path'].map(lambda x: x.split('/')[-2].split('.')[1])
+
+    label_dict.to_pickle(label_dict_path)
+    trainset.to_pickle(trainset_path)
+    testset.to_pickle(testset_path)
+else:
+    trainset = pd.read_pickle( trainset_path )
+    testset  = pd.read_pickle( testset_path )
+    label_dict = pd.read_pickle( label_dict_path )
+    n_labels = len(label_dict)
+
+
+learning_rate = tf.placeholder( tf.float32, [])
+images_tf = tf.placeholder( tf.float32, [None, 224, 224, 3], name="images")
+labels_tf = tf.placeholder( tf.int64, [None], name='labels')
+pretrained_weights = cPickle.load(open(weight_path, 'rb'),encoding='bytes',fix_imports=True, errors='strict')
+
+#detector = Detector(n_labels,pretrained_weights)
+
+##### cnn building
+rgb=images_tf
+bgr=images_tf
+bottom=bgr
+#namerelu="conv1_1"
+#name=b'conv1_1'
+image_mean = [103.939, 116.779, 123.68]
+
+p1,p2,p3,p4,conv5, conv6, gap, output =pool1, pool2, pool3, pool4, relu5_3, conv6, gap, output #fetch in test.py
+#######
+
+#p1,p2,p3,p4,conv5, conv6, gap, output = inference(images_tf)
+loss_tf = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits( output, labels_tf ))
+
+weights_only = filter( lambda x: x.name.endswith('W:0'), tf.trainable_variables() )
+weight_decay = tf.reduce_sum(tf.pack([tf.nn.l2_loss(x) for x in weights_only])) * weight_decay_rate
+loss_tf += weight_decay
+
+sess = tf.InteractiveSession()
+saver = tf.train.Saver( max_to_keep=50 )
+
+optimizer = tf.train.MomentumOptimizer( learning_rate, momentum )
+grads_and_vars = optimizer.compute_gradients( loss_tf )
+grads_and_vars = map(lambda gv: (gv[0], gv[1]) if ('conv6' in gv[1].name or 'GAP' in gv[1].name) else (gv[0]*0.1, gv[1]), grads_and_vars)
+#grads_and_vars = [(tf.clip_by_value(gv[0], -5., 5.), gv[1]) for gv in grads_and_vars]
+train_op = optimizer.apply_gradients( grads_and_vars )
+tf.global_variables_initializer().run()
+
+if pretrained_model_path:
+    print("Pretrained")
+    saver.restore(sess, pretrained_model_path)
+
+##OPTIONAL
+trainset = trainset.ix[ np.random.permutation( len(trainset) )]#eventually restrict to get faster results
+testset = testset.ix[ np.random.permutation( len(testset) )]#eventually restrict to get faster results
+testset.index  = range( len(testset) )
+#testset = testset.ix[np.random.permutation( len(testset) )]#[:1000]
+#trainset2 = testset[1000:]
+#testset = testset[:1000]
+
+#trainset = pd.concat( [trainset, trainset2] )
+# We lack the number of training set. Let's use some of the test images
+
+f_log = open('/Users/mathildebateson/Documents/MVA/Recvis/Caltech/log.caltech256.txt', 'w')
+
+iterations = 0
+loss_list = []
+for epoch in range(n_epochs):
+
+    trainset.index = range( len(trainset) )
+    trainset = trainset.ix[ np.random.permutation( len(trainset) )]
+
+    for start, end in zip(
+        #range( 0, len(trainset)+batch_size, batch_size),
+        range( 7740, len(trainset)+batch_size, batch_size),
+        range(batch_size+7740, len(trainset)+batch_size, batch_size)):
+
+        current_data = trainset[start:end]
+
+        #old
+        #current_image_paths = current_data['image_path'].values
+        #current_images = list(map(lambda x: load_image(x), current_image_paths))
+
+        #good_index = list(map(lambda x: x is not None, current_images))
+
+        #current_data = current_data[good_index]
+        #current_images = np.stack(current_images[good_index])
+        #current_labels = current_data['label'].values
+
+        ##new
+        current_image_paths = current_data['image_path'].values
+        current_images = list(map(lambda x: load_image(x), current_image_paths))
+
+        good_index = list(map(lambda x: x is not None, current_images))
+        current_data = current_data[good_index]
+        current_image_paths = current_data['image_path'].values
+        current_images = list(map(lambda x: load_image(x), current_image_paths))
+        current_labels = current_data['label'].values
+
+
+        _, loss_val, output_val = sess.run(
+                [train_op, loss_tf, output],
+                feed_dict={
+                    learning_rate: init_learning_rate,
+                    images_tf: current_images,
+                    labels_tf: current_labels
+                    })
+
+        loss_list.append( loss_val )
+
+        iterations += 1
+        if iterations % 5 == 0:
+            print("======================================")
+            print("Epoch", epoch, "Iteration", iterations)
+            print("Processed", start, '/', len(trainset))
+
+            label_predictions = output_val.argmax(axis=1)
+            acc = (label_predictions == current_labels).sum()
+
+            print( "Accuracy:", acc, '/', len(current_labels))
+            print("Training Loss:", np.mean(loss_list))
+            print("\n")
+            loss_list = []
+
+    n_correct = 0
+    n_back_correct = 0
+    n_back=0
+    n_data = 0
+    print("second loop")
+    for start, end in zip(
+            range(0, len(testset)+batch_size, batch_size),
+            range(batch_size, len(testset)+batch_size, batch_size)
+            ):
+        print(start)
+        current_data = testset[start:end]
+        current_image_paths = current_data['image_path'].values
+        current_images = list(map(lambda x: load_image(x), current_image_paths))
+
+        good_index = list(map(lambda x: x is not None, current_images))
+        current_data = current_data[good_index]
+        current_image_paths = current_data['image_path'].values
+        current_images = list(map(lambda x: load_image(x), current_image_paths))
+        current_labels = current_data['label'].values
+
+        output_vals = sess.run(
+                output,
+                feed_dict={images_tf:current_images})
+
+        label_predictions = output_vals.argmax(axis=1)
+        acc = (label_predictions == current_labels).sum()
+        truepos=(current_labels[current_labels==1]==label_predictions[current_labels==1]).sum()
+
+        n_back_correct+=truepos
+        n_correct += acc
+        n_data += len(current_data)
+        n_back+=current_labels[current_labels==1].sum()
+
+    acc_all = n_correct / float(n_data)
+    recall_all = n_back_correct / float(n_back)
+    f_log.write('epoch:'+str(epoch)+'\tacc:'+str(acc_all) + '\n')
+    print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
+    print('epoch:'+str(epoch)+'\tacc:'+str(acc_all) + '\n')
+    print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
+
+    saver.save( sess, os.path.join( model_path, 'model'), global_step=3)
+
+    init_learning_rate *= 0.99
